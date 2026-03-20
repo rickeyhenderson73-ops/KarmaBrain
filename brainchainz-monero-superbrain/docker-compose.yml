@@ -1,0 +1,179 @@
+version: "3.7"
+
+services:
+
+  app_proxy:
+    environment:
+      APP_HOST: brainchainz-monero-superbrain_dashboard_1
+      APP_PORT: 3000
+
+  monerod:
+    image: sethsimmons/simple-monerod:latest
+    container_name: brainchainz-monero-superbrain_monerod_1
+    restart: on-failure
+    stop_grace_period: 5m
+    command: >-
+      --rpc-bind-ip=0.0.0.0
+      --rpc-bind-port=18081
+      --restricted-rpc
+      --confirm-external-bind
+      --zmq-pub=tcp://0.0.0.0:18083
+      --p2p-bind-ip=0.0.0.0
+      --p2p-bind-port=18080
+      --prune-blockchain
+      --sync-pruned-blocks
+      --db-sync-mode=safe
+      --no-igd
+      --out-peers=16
+      --in-peers=32
+      --enable-dns-blocklist
+      --non-interactive
+      --log-level=0
+    volumes:
+      - ${APP_DATA_DIR}/monerod:/home/monero/.bitmonero
+    ports:
+      - "18080:18080"
+    networks:
+      - default
+
+  p2pool:
+    image: sethsimmons/p2pool:latest
+    container_name: brainchainz-monero-superbrain_p2pool_1
+    restart: on-failure
+    stop_grace_period: 2m
+    depends_on:
+      - monerod
+    entrypoint: /bin/sh
+    command: >-
+      -c "
+      if [ -f /data/.env ]; then . /data/.env; fi;
+
+      WALLET=\"$${WALLET_ADDRESS:-}\";
+      if [ -z \"$$WALLET\" ]; then
+        echo 'No wallet address configured. Open the dashboard and enter your XMR wallet address.';
+        sleep 60; exit 1;
+      fi;
+
+      CHAIN=\"$${P2POOL_CHAIN:---mini}\";
+      echo \"P2Pool starting | chain: $$CHAIN | node: monerod:18081\";
+
+      exec p2pool
+        --wallet $$WALLET
+        --host monerod
+        --rpc-port 18081
+        --zmq-port 18083
+        --stratum 0.0.0.0:3333
+        --p2p 0.0.0.0:37889
+        --addpeers 65.21.227.114:37888,node.sethforprivacy.com:37888
+        --loglevel 3
+        --no-color
+        $$CHAIN
+      "
+    ports:
+      - "37889:37889"
+      - "37888:37888"
+      - "3333:3333"
+    volumes:
+      - ${APP_DATA_DIR}/p2pool:/data
+    networks:
+      - default
+
+  xmrig-proxy:
+    image: techcf/xmrig-proxy:latest
+    container_name: brainchainz-monero-superbrain_proxy_1
+    restart: on-failure
+    stop_grace_period: 1m
+    depends_on:
+      - p2pool
+    command: >-
+      xmrig-proxy
+      -o p2pool:3333
+      -u SuperbrainProxy
+      -b 0.0.0.0:8888
+      --http-host 0.0.0.0
+      --http-port 8080
+      --http-access-token superbrain
+    ports:
+      - "8888:8888"
+    volumes:
+      - ${APP_DATA_DIR}/proxy:/data
+    networks:
+      - default
+
+  xmrig:
+    image: minerboy/xmrig:latest
+    container_name: brainchainz-monero-superbrain_xmrig_1
+    restart: on-failure
+    stop_grace_period: 1m
+    privileged: true
+    depends_on:
+      - xmrig-proxy
+    entrypoint: /bin/sh
+    command: >-
+      -c "
+      if [ -f /data/.env ]; then . /data/.env; fi;
+
+      ENABLED=\"$${XMRIG_ENABLED:-false}\";
+      if [ \"$$ENABLED\" != 'true' ]; then
+        echo 'XMRig is disabled. Enable it from the Superbrain dashboard.';
+        while true; do sleep 60; done;
+      fi;
+
+      THREADS=\"$${XMRIG_THREADS:-0}\";
+      echo 1280 > /proc/sys/vm/nr_hugepages 2>/dev/null || true;
+      sleep 2;
+
+      THREAD_ARG='';
+      if [ \"$$THREADS\" != '0' ] && [ -n \"$$THREADS\" ]; then
+        THREAD_ARG=\"--threads $$THREADS\";
+      fi;
+
+      echo \"XMRig starting | threads: $${THREADS:-auto}\";
+      exec /app/xmrig
+        --config=/dev/null
+        -o xmrig-proxy:8888
+        -u 'Sup3rBra1n'
+        -p x
+        --coin monero
+        --donate-level 0
+        -k
+        --randomx-1gb-pages
+        --huge-pages-jit
+        $$THREAD_ARG
+      "
+    volumes:
+      - ${APP_DATA_DIR}/xmrig:/data
+    networks:
+      - default
+
+  dashboard:
+    image: sirjamzalot/monero-superbrain-dashboard:latest
+    container_name: brainchainz-monero-superbrain_dashboard_1
+    restart: on-failure
+    stop_grace_period: 1m
+    depends_on:
+      - monerod
+      - p2pool
+      - xmrig-proxy
+    environment:
+      - APP_DATA_DIR=${APP_DATA_DIR}/data
+      - MONEROD_HOST=monerod
+      - MONEROD_RPC_PORT=18081
+      - MONEROD_ZMQ_PORT=18083
+      - P2POOL_HOST=p2pool
+      - XMRIG_PROXY_HOST=xmrig-proxy
+      - XMRIG_PROXY_API_PORT=8080
+      - XMRIG_PROXY_API_TOKEN=superbrain
+      - DASHBOARD_PORT=3000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${APP_DATA_DIR}/data:/data
+    networks:
+      - default
+
+networks:
+  default:
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.99.99.0/24
