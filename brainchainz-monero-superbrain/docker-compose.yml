@@ -1,0 +1,234 @@
+version: "3.7"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Monero Superbrain — KarmaBrain Edition
+#
+# STACK:
+#   monerod       → theretromike/nodes:monero  (pruned, battle-tested)
+#   node-status   → hvalev/monero-dashboard    (sync progress UI, confirmed real)
+#   dashboard     → sirjamzalot/monero-superbrain-dashboard (full mining UI)
+#   p2pool        → sethsimmons/p2pool
+#   xmrig-proxy   → techcf/xmrig-proxy
+#   xmrig         → minerboy/xmrig
+#
+# USER FLOW:
+#   Port 3000 is what Umbrel shows the user.
+#   - node-status runs on 3000 and shows sync progress
+#   - Once synced, user clicks through to the Superbrain dashboard on port 3001
+#   - Both are always running — no switching needed
+#
+# WALLET SETUP (SSH into Umbrel):
+#   mkdir -p ~/umbrel/app-data/brainchainz-monero-superbrain/p2pool
+#   echo "WALLET_ADDRESS=YOUR_XMR_ADDRESS" > \
+#     ~/umbrel/app-data/brainchainz-monero-superbrain/p2pool/.env
+#
+# ENABLE LOCAL CPU MINING:
+#   echo "XMRIG_ENABLED=true" >> \
+#     ~/umbrel/app-data/brainchainz-monero-superbrain/p2pool/.env
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Umbrel App Proxy — serves node-status dashboard on port 3000 ────────────
+  app_proxy:
+    environment:
+      APP_HOST: brainchainz-monero-superbrain_node-status_1
+      APP_PORT: 3000
+
+  # ── RetroMike Monero Node (pruned) ─────────────────────────────────────────
+  monerod:
+    image: theretromike/nodes:monero
+    container_name: brainchainz-monero-superbrain_monerod_1
+    restart: on-failure
+    stop_grace_period: 5m
+    volumes:
+      - ${APP_DATA_DIR}/monerod:/root/.bitmonero
+    ports:
+      - "18080:18080"
+    # RetroMike's image reads monerod.conf from the data volume.
+    # We write a pruned config on startup.
+    entrypoint: /bin/sh
+    command: >-
+      -c "
+      mkdir -p /root/.bitmonero;
+      cat > /root/.bitmonero/monerod.conf << 'EOF'
+      rpc-bind-ip=0.0.0.0
+      rpc-bind-port=18081
+      restricted-rpc=1
+      confirm-external-bind=1
+      zmq-pub=tcp://0.0.0.0:18083
+      p2p-bind-ip=0.0.0.0
+      p2p-bind-port=18080
+      prune-blockchain=1
+      sync-pruned-blocks=1
+      db-sync-mode=safe
+      no-igd=1
+      out-peers=16
+      in-peers=32
+      enable-dns-blocklist=1
+      non-interactive=1
+      log-level=0
+      EOF
+      exec monerod --config-file=/root/.bitmonero/monerod.conf
+      "
+    networks:
+      - default
+
+  # ── hvalev/monero-dashboard — live sync status page (CONFIRMED REAL IMAGE) ─
+  # Shows: block height, sync %, peer count, network stats, database size
+  # This is what users see on port 3000 while the node syncs
+  node-status:
+    image: hvalev/monero-dashboard:latest
+    container_name: brainchainz-monero-superbrain_node-status_1
+    restart: on-failure
+    stop_grace_period: 30s
+    depends_on:
+      - monerod
+    environment:
+      - MONERO_HOST=monerod
+      - MONERO_PORT=18081
+      - TICKER=true
+      - PORT=3000
+    networks:
+      - default
+
+  # ── Superbrain Dashboard — full mining UI ──────────────────────────────────
+  # Runs on port 3001 internally — accessible at umbrel.local:3001
+  # Points at our internal monerod instead of the external Umbrel Monero app
+  dashboard:
+    image: sirjamzalot/monero-superbrain-dashboard:latest
+    container_name: brainchainz-monero-superbrain_dashboard_1
+    restart: on-failure
+    stop_grace_period: 1m
+    depends_on:
+      - monerod
+      - p2pool
+      - xmrig-proxy
+    environment:
+      - APP_DATA_DIR=${APP_DATA_DIR}/data
+      - APP_MONERO_NODE_IP=monerod
+      - APP_MONERO_RPC_PORT=18081
+      - APP_MONERO_ZMQ_PORT=18083
+      - APP_MONERO_RPC_USER=
+      - APP_MONERO_RPC_PASS=
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ${APP_DATA_DIR}/data:/data
+    ports:
+      - "3001:3000"
+    networks:
+      - default
+
+  # ── P2Pool ─────────────────────────────────────────────────────────────────
+  p2pool:
+    image: sethsimmons/p2pool:latest
+    container_name: brainchainz-monero-superbrain_p2pool_1
+    restart: on-failure
+    stop_grace_period: 2m
+    depends_on:
+      - monerod
+    entrypoint: /bin/sh
+    command: >-
+      -c "
+      if [ -f /data/.env ]; then . /data/.env; fi;
+      WALLET=\"$${WALLET_ADDRESS:-}\";
+      if [ -z \"$$WALLET\" ]; then
+        echo '⚠️  No wallet set. Add WALLET_ADDRESS=your_address to the p2pool/.env file';
+        sleep 60; exit 1;
+      fi;
+      CHAIN=\"$${P2POOL_CHAIN:---mini}\";
+      echo \"P2Pool starting | chain: $$CHAIN | node: monerod:18081\";
+      exec p2pool
+        --wallet $$WALLET
+        --host monerod
+        --rpc-port 18081
+        --zmq-port 18083
+        --stratum 0.0.0.0:3333
+        --p2p 0.0.0.0:37889
+        --addpeers 65.21.227.114:37888,node.sethforprivacy.com:37888
+        --loglevel 3
+        --no-color
+        $$CHAIN
+      "
+    ports:
+      - "37889:37889"
+      - "37888:37888"
+      - "3333:3333"
+    volumes:
+      - ${APP_DATA_DIR}/p2pool:/data
+    networks:
+      - default
+
+  # ── XMRig Proxy — external miners connect here ────────────────────────────
+  xmrig-proxy:
+    image: techcf/xmrig-proxy:latest
+    container_name: brainchainz-monero-superbrain_proxy_1
+    restart: on-failure
+    stop_grace_period: 1m
+    depends_on:
+      - p2pool
+    command: >-
+      xmrig-proxy
+      -o p2pool:3333
+      -u SuperbrainProxy
+      -b 0.0.0.0:8888
+      --http-host 0.0.0.0
+      --http-port 8080
+      --http-access-token superbrain
+    ports:
+      - "8888:8888"
+    volumes:
+      - ${APP_DATA_DIR}/proxy:/data
+    networks:
+      - default
+
+  # ── XMRig local CPU miner (disabled by default) ───────────────────────────
+  xmrig:
+    image: minerboy/xmrig:latest
+    container_name: brainchainz-monero-superbrain_xmrig_1
+    restart: on-failure
+    stop_grace_period: 1m
+    privileged: true
+    depends_on:
+      - xmrig-proxy
+    entrypoint: /bin/sh
+    command: >-
+      -c "
+      if [ -f /data/.env ]; then . /data/.env; fi;
+      ENABLED=\"$${XMRIG_ENABLED:-false}\";
+      if [ \"$$ENABLED\" != 'true' ]; then
+        echo 'XMRig disabled. Set XMRIG_ENABLED=true in p2pool/.env to mine.';
+        while true; do sleep 60; done;
+      fi;
+      THREADS=\"$${XMRIG_THREADS:-0}\";
+      echo 1280 > /proc/sys/vm/nr_hugepages 2>/dev/null || true;
+      echo 3 > /proc/sys/vm/nr_hugepages_mempolicy 2>/dev/null || true;
+      sleep 2;
+      THREAD_ARG='';
+      if [ \"$$THREADS\" != '0' ] && [ -n \"$$THREADS\" ]; then
+        THREAD_ARG=\"--threads $$THREADS\";
+      fi;
+      echo \"XMRig starting | threads: $${THREADS:-auto}\";
+      exec /app/xmrig
+        --config=/dev/null
+        -o xmrig-proxy:8888
+        -u 'Sup3rBra1n XMR1G'
+        -p x
+        --coin monero
+        --donate-level 0
+        -k
+        --randomx-1gb-pages
+        --huge-pages-jit
+        $$THREAD_ARG
+      "
+    volumes:
+      - ${APP_DATA_DIR}/xmrig:/data
+    networks:
+      - default
+
+networks:
+  default:
+    ipam:
+      driver: default
+      config:
+        - subnet: 10.99.99.0/24
