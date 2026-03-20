@@ -1,0 +1,35 @@
+manifestVersion: 1
+id: brainchainz-monero-superbrain
+category: bitcoin
+name: Monero Superbrain
+version: "1.0.0"
+tagline: Mine Monero privately with your own built-in pruned node
+description: >-
+  Monero Superbrain is a fully self-contained Monero mining powerhouse for
+  your Umbrel. No separate Monero node required — it runs its own pruned
+  Monero node, P2Pool, XMRig Proxy, and a status dashboard all in one app.
+
+  Just install, set your wallet address in the app data .env file, and you
+  are mining — fully decentralized with no pool fees.
+
+  Features:
+  - Built-in pruned Monero node — syncs trustlessly from scratch
+  - Live sync progress dashboard — always know exactly where you are
+  - P2Pool decentralized mining — mini or main chain
+  - XMRig CPU miner — enable via /data/.env when ready
+  - XMRig Proxy — connect external miners at umbrel.local:8888
+  - No pool fees, no centralized operators
+
+releaseNotes: ""
+developer: brainchainz
+website: https://github.com/rickeyhenderson73-ops/KarmaBrain
+dependencies: []
+repo: https://github.com/rickeyhenderson73-ops/KarmaBrain
+support: https://github.com/rickeyhenderson73-ops/KarmaBrain/issues
+port: 3000
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+submitter: brainchainz
+submission: https://github.com/rickeyhenderson73-ops/KarmaBrain
