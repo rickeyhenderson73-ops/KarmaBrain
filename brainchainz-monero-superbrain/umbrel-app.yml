@@ -1,41 +1,146 @@
-manifestVersion: 1
-id: brainchainz-monero-superbrain
-category: bitcoin
-name: Monero Superbrain
-version: "1.0.0"
-tagline: Mine Monero privately with your own built-in pruned node
-description: >-
-  Monero Superbrain is a fully self-contained Monero mining powerhouse for
-  your Umbrel. No separate Monero node required.
+version: "3.7"
 
-  Powered by RetroMike's battle-tested Monero node Docker image, the full
-  Superbrain dashboard, P2Pool decentralized mining, XMRig Proxy, and a
-  live node sync status page — all in one app.
+services:
 
-  What you see:
-  - During sync: Live node dashboard showing block height, sync percentage,
-    peers, and estimated time remaining so you always know what is happening
-  - After sync: Full Superbrain dashboard with P2Pool stats, hashrate,
-    earnings tracker, theme engine, and Farm Commander
+  # ------------------------------
+  # Monero Full Node (RetroMike)
+  # ------------------------------
+  monerod:
+    image: theretromike/nodes:monero
+    restart: unless-stopped
+    stop_grace_period: 1m
+    volumes:
+      - ${APP_DATA_DIR:-/data}/.monero:/root/.bitmonero
+    ports:
+      - "18080:18080"   # P2P
+      - "18081:18081"   # RPC
+      - "18083:18083"   # ZMQ
+    command: >
+      monerod
+      --non-interactive
+      --confirm-external-bind
+      --out-peers 32
+      --in-peers 32
+      --p2p-bind-ip=0.0.0.0
+      --p2p-bind-port=18080
+      --rpc-bind-ip=0.0.0.0
+      --rpc-bind-port=18081
+      --rpc-login=${APP_MONERO_RPC_USER:-monero}:${APP_MONERO_RPC_PASS:-monero}
+      --zmq-pub=tcp://0.0.0.0:18083
+      --prune-blockchain
 
-  Features:
-  - RetroMike pruned Monero node — battle tested, ARM + x86
-  - P2Pool decentralized mining — mini chain by default, no pool fees
-  - Full Superbrain dashboard with theme engine once synced
-  - XMRig CPU miner — disabled by default, enable via dashboard
-  - XMRig Proxy — connect external miners at umbrel.local:8888 algo rx/0
-  - Farm Commander for managing multiple rigs
+  # ------------------------------
+  # Dashboard UI
+  # ------------------------------
+  dashboard:
+    image: sirjamzalot/monero-superbrain-dashboard:latest
+    restart: unless-stopped
+    depends_on:
+      - monerod
+    environment:
+      - APP_DATA_DIR=${APP_DATA_DIR:-/data}
+      - APP_MONERO_NODE_IP=monerod
+      - APP_MONERO_RPC_PORT=18081
+      - APP_MONERO_ZMQ_PORT=18083
+      - APP_MONERO_RPC_USER=${APP_MONERO_RPC_USER:-monero}
+      - APP_MONERO_RPC_PASS=${APP_MONERO_RPC_PASS:-monero}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${APP_DATA_DIR:-/data}:/data
+    networks:
+      - default
+    ports:
+      - "3000:3000"
 
-releaseNotes: ""
-developer: brainchainz
-website: https://github.com/rickeyhenderson73-ops/KarmaBrain
-dependencies: []
-repo: https://github.com/rickeyhenderson73-ops/KarmaBrain
-support: https://github.com/rickeyhenderson73-ops/KarmaBrain/issues
-port: 3000
-gallery: []
-path: ""
-defaultUsername: ""
-defaultPassword: ""
-submitter: brainchainz
-submission: https://github.com/rickeyhenderson73-ops/KarmaBrain
+  # ------------------------------
+  # P2Pool (Decentralized Pool)
+  # ------------------------------
+  p2pool:
+    image: sethsimmons/p2pool:latest
+    restart: unless-stopped
+    depends_on:
+      - monerod
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      if [ -f /data/.env ]; then . /data/.env; fi;
+      WALLET=\"${WALLET_ADDRESS:-YOUR_WALLET_HERE}\";
+      CHAIN=\"${P2POOL_CHAIN:---mini}\";
+      echo \"Starting P2Pool...\";
+      exec p2pool
+      --wallet $$WALLET
+      --host monerod
+      --rpc-port 18081
+      --zmq-port 18083
+      --stratum 0.0.0.0:3333
+      --p2p 0.0.0.0:37889
+      --loglevel 3
+      $$CHAIN
+      --rpc-login ${APP_MONERO_RPC_USER:-monero}:${APP_MONERO_RPC_PASS:-monero}
+      "
+    ports:
+      - "3333:3333"
+      - "37889:37889"
+    volumes:
+      - ${APP_DATA_DIR:-/data}:/data
+    networks:
+      - default
+
+  # ------------------------------
+  # XMRig Proxy
+  # ------------------------------
+  xmrig-proxy:
+    image: techcf/xmrig-proxy:latest
+    restart: unless-stopped
+    depends_on:
+      - p2pool
+    command: >
+      xmrig-proxy
+      -o p2pool:3333
+      -u superbrain
+      -b 0.0.0.0:8888
+      --http-host 0.0.0.0
+      --http-port 8080
+    ports:
+      - "8888:8888"
+      - "8080:8080"
+    volumes:
+      - ${APP_DATA_DIR:-/data}/proxy:/data
+    networks:
+      - default
+
+  # ------------------------------
+  # CPU Miner (XMRig)
+  # ------------------------------
+  xmrig:
+    image: minerboy/xmrig:latest
+    restart: unless-stopped
+    privileged: true
+    depends_on:
+      - xmrig-proxy
+    entrypoint: /bin/sh
+    command: >
+      -c "
+      if [ -f /data/.env ]; then . /data/.env; fi;
+      THREADS=\"${XMRIG_THREADS:-0}\";
+      echo 1280 > /proc/sys/vm/nr_hugepages 2>/dev/null;
+      sleep 2;
+      THREAD_ARG='';
+      if [ \"$$THREADS\" != '0' ]; then THREAD_ARG=\"--threads $$THREADS\"; fi;
+      exec /app/xmrig
+      -o xmrig-proxy:8888
+      -u 'superbrain-worker'
+      -p x
+      --coin monero
+      --donate-level 0
+      --randomx-1gb-pages
+      $$THREAD_ARG
+      "
+    volumes:
+      - ${APP_DATA_DIR:-/data}:/data
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge
